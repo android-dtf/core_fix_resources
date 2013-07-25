@@ -111,7 +111,7 @@ for root, subFolders, files in os.walk(smali_files):
          for line in re.split("\n", open(file_path).read()):
 
             # First do "const-string" instances
-            if re.search("const.*0x[a-fA-F0-9]{4,8}$", line):
+            if re.search("const[ \/\-].*0x[a-fA-F0-9]{4,8}$", line):
 
                # Get the actual value
                res_value = line[line.find(",")+2: len(line)]
@@ -156,7 +156,7 @@ for root, subFolders, files in os.walk(smali_files):
 
          if file_modded == True:
             output = open(file_path, 'w')
-            output.write(data)
+            output.write(data.encode('utf-8'))
             debug("Changes applied to file \'%s\'" % (file_path))
             output.close()
 
