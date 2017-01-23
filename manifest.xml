@@ -1,0 +1,9 @@
+<Items>
+    <Item type="module"
+          name="fixresources"
+          version="1.0.0"
+          health="beta"
+          author="Jake Valletta (jakev)"
+          about="Resolve resource values in Smali files."
+          localName="fixresources" />
+</Items>

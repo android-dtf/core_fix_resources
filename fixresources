@@ -1,0 +1,271 @@
+#!/usr/bin/env python
+
+# DTF Core Content
+# Copyright 2013-2016 Jake Valletta (@jake_valletta)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+"""Resolve resource values in Smali files"""
+from lxml import etree
+import os
+import os.path
+import re
+
+import dtf.logging as log
+from dtf.module import Module
+
+DISPLAY_LEN = 25
+PUBLIC_FILE_PATH = "/res/values/public.xml"
+STRING_FILE_PATH = "/res/values/strings.xml"
+SMALI_FILES_PATH = "/smali"
+
+CONST_REGEX = re.compile("const[ \/\-].*0x[a-fA-F0-9]{4,8}$")
+PACKED_SWITCH_REGEX = re.compile("\.packed-switch 0x[a-fA-F0-9]{4,8}$")
+
+TAG = 'fixresources'
+
+class fixresources(Module):
+
+    """Module class for resolving resources"""
+
+    about = 'Resolve resource values in Smali files.'
+    author = 'Jake Valletta (jakev)'
+    health = 'beta'
+    name = 'fixresources'
+    version = '1.0.0'
+
+    public_dict = {}
+    has_strings = False
+
+    def usage(self):
+
+        """Module usage"""
+
+        print "fixresources v%s" % self.version
+        print ""
+        print "Usage: fixresources [decoded_app_dir]"
+        print ""
+
+        return 0
+
+    def do_parse_public(self, project_dir):
+
+        """Parse public.xml file"""
+
+        public_file_path = "%s/%s" % (project_dir, PUBLIC_FILE_PATH)
+
+        if not os.path.isfile(public_file_path):
+            log.e(TAG, "'%s' public resource file not found!"
+                                                % public_file_path)
+            return -1
+
+        log.i(TAG, "Parsing public.xml...")
+
+        for _, element in etree.iterparse(public_file_path):
+            if element.tag == "public":
+
+                try:
+                    res_id = element.attrib['id']
+
+                    log.d(TAG, "Adding new public resource value %s" % (res_id))
+                    self.public_dict[int(res_id, 16)] = [element.attrib['name'],
+                                                        element.attrib['type']]
+
+                    if element.attrib['type'] == "string":
+                        self.has_strings = True
+
+                except KeyError:
+                    log.w(TAG, "KeyError iterating public.xml, skipping!")
+
+            # Clear the element from memory
+            element.clear()
+
+        return 0
+
+    def do_parse_strings(self, project_dir):
+
+        """Parse strings.xml file"""
+
+        string_file_path = "%s/%s" % (project_dir, STRING_FILE_PATH)
+
+        if not os.path.isfile(string_file_path):
+            log.e(TAG, "'%s' public resource file not found!")
+            return -1
+
+        log.i(TAG, "Parsing strings.xml...")
+
+        for _, element in etree.iterparse(string_file_path):
+
+            if element.tag == "string":
+
+                try:
+                    string_name = element.attrib['name']
+                    for pub in self.public_dict.keys():
+                        if (self.public_dict[pub][0] == string_name and
+                                        self.public_dict[pub][1] == "string"):
+                            log.d(TAG, "Adding string details to %s (0x%08x)"
+                                                        % (string_name, pub))
+                            self.public_dict[pub].append(element.text)
+
+                except KeyError:
+                    log.w(TAG, "KeyError iterating strings.xml, skipping!")
+
+            # Clear the element from memory
+            element.clear()
+
+        return 0
+
+    def do_changes(self, project_dir):
+
+        """Do smali changes"""
+
+        smali_files_dir = "%s/%s" % (project_dir, SMALI_FILES_PATH)
+
+        if not os.path.isdir(smali_files_dir):
+            log.e(TAG, "Smali files directory does not exist!")
+            return -2
+
+        log.i(TAG, "Making modifications to files in smali/*...")
+
+        for root, dirs, files in os.walk(smali_files_dir):
+
+            for filename in files:
+                file_path = os.path.join(root, filename)
+
+                # Smali only files and no R.smali junk
+                if (re.search(".*\.smali$", file_path)
+                                    and file_path != 'R.smali'):
+
+                    self.change_file(file_path)
+
+    def change_file(self, file_path):
+
+        """Perform change to a smali file"""
+
+        data = ''
+        file_modded = False
+
+        for line in re.split("\n", open(file_path).read()):
+
+            # First do "const-string" instances
+            if re.search(CONST_REGEX, line):
+
+                # Get the actual value
+                res_value = line[line.find(",") + 2:len(line)]
+
+                # To save space, some are const/high16
+                if line.find("high16") != -1:
+                    res_value_int = int(res_value + "0000", 16)
+                else:
+                    res_value_int = int(res_value, 16)
+
+                # Determine if this is a value in our list
+                if res_value_int in self.public_dict.keys():
+                    log.d(TAG, "We found a resource identifier: %s [%s]"
+                                                    % (res_value, file_path))
+
+                    line_len = len(line)
+                    line += ("\t#Public value '%s' (type=%s)"
+                                    % (self.public_dict[res_value_int][0],
+                                       self.public_dict[res_value_int][1]))
+
+                    if len(self.public_dict[res_value_int]) == 3:
+                        string_value = self.public_dict[res_value_int][2]
+
+                        if string_value is None:
+                            log.w(TAG, "String value for value %s not found!"
+                                                                % res_value)
+                            continue
+
+                        formatted_string_value = (string_value[0:DISPLAY_LEN]
+                                + ("..." if len(string_value) > DISPLAY_LEN
+                                        else ""))
+
+
+                        line += ("\n%s\t#%s = '%s'"
+                                % (" " * line_len,
+                                self.public_dict[res_value_int][0],
+                                formatted_string_value))
+
+                    file_modded = True
+
+            # Now check for "packed-switch" instances
+            elif re.search(PACKED_SWITCH_REGEX, line):
+
+                res_value = line[line.find("0x"): len(line)]
+                res_value_int = int(res_value, 16)
+
+                # Determine if this is a value in our list
+                if res_value_int in self.public_dict.keys():
+                    log.d(TAG, "Found packed-switch resource identifier: %s"
+                                                                % res_value)
+
+                    line += ("\t#Public value '%s' (type=%s)"
+                                    % (self.public_dict[res_value_int][0],
+                                    self.public_dict[res_value_int][1]))
+
+                    file_modded = True
+
+            # Add the new data to a buffer
+            data += line + "\n"
+
+        # Write the changes out.
+        if file_modded == True:
+            output = open(file_path, 'w')
+            output.write(data.encode('utf-8'))
+            log.d(TAG, "Changes applied to file '%s'" % (file_path))
+            output.close()
+        else:
+            log.d(TAG, "No changes to file '%s'" % (file_path))
+
+        return 0
+
+    def do_fix(self, args):
+
+        """Do fix resources"""
+
+        arg_app_dir = args.pop()
+
+        if not os.path.isdir(arg_app_dir):
+            log.e(TAG, "Application directory '%s' doesnt exist!"
+                                                        % arg_app_dir)
+            return -1
+
+        self.has_strings = False
+        self.public_dict = {}
+
+        # First do the public resources
+        if self.do_parse_public(arg_app_dir) != 0:
+            return -2
+
+        # Next do strings
+        if self.has_strings:
+            if self.do_parse_strings(arg_app_dir) != 0:
+                return -3
+
+        # Do actual changes
+        if self.do_changes(arg_app_dir) != 0:
+            return -4
+
+        log.i(TAG, "Process complete!")
+
+
+    def execute(self, args):
+
+        """Main class execution"""
+
+        if len(args) != 1:
+            self.usage()
+            return -1
+
+        return self.do_fix(args)
